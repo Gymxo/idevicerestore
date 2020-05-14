@@ -45,6 +45,7 @@ extern "C" {
 #define FLAG_INTERACTIVE     (1 << 9)
 #define FLAG_ALLOW_RESTORE_MODE (1 << 10)
 #define FLAG_NO_RESTORE      (1 << 11)
+#define FLAG_LATEST_SHSH      (1 << 12)
 
 struct idevicerestore_client_t;
 
@@ -96,8 +97,8 @@ int build_identity_check_components_in_ipsw(plist_t build_identity, const char* 
 int build_identity_has_component(plist_t build_identity, const char* component);
 int build_identity_get_component_path(plist_t build_identity, const char* component, char** path);
 int ipsw_extract_filesystem(const char* ipsw, plist_t build_identity, char** filesystem);
-int extract_component(const char* ipsw, const char* path, unsigned char** component_data, unsigned int* component_size);
-int personalize_component(const char *component, const unsigned char* component_data, unsigned int component_size, plist_t tss_response, unsigned char** personalized_component, unsigned int* personalized_component_size);
+int extract_component(const char* ipsw, const char* path, unsigned char** component_data, size_t* component_size);
+int personalize_component(const char *component, const unsigned char* component_data, size_t component_size, plist_t tss_response, unsigned char** personalized_component, unsigned int* personalized_component_size);
 int get_preboard_manifest(struct idevicerestore_client_t* client, plist_t build_identity, plist_t* manifest);
 
 const char* get_component_name(const char* filename);

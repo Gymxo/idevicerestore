@@ -340,7 +340,7 @@ int ipsw_file_exists(const char* ipsw, const char* infile)
 	return 1;
 }
 
-int ipsw_extract_to_memory(const char* ipsw, const char* infile, unsigned char** pbuffer, unsigned int* psize)
+int ipsw_extract_to_memory(const char* ipsw, const char* infile, unsigned char** pbuffer, size_t* psize)
 {
 	size_t size = 0;
 	unsigned char* buffer = NULL;
@@ -441,7 +441,7 @@ int ipsw_extract_to_memory(const char* ipsw, const char* infile, unsigned char**
 
 int ipsw_extract_build_manifest(const char* ipsw, plist_t* buildmanifest, int *tss_enabled)
 {
-	unsigned int size = 0;
+	size_t size = 0;
 	unsigned char* data = NULL;
 
 	*tss_enabled = 0;
@@ -471,7 +471,7 @@ int ipsw_extract_build_manifest(const char* ipsw, plist_t* buildmanifest, int *t
 
 int ipsw_extract_restore_plist(const char* ipsw, plist_t* restore_plist)
 {
-	unsigned int size = 0;
+	size_t size = 0;
 	unsigned char* data = NULL;
 
 	if (ipsw_extract_to_memory(ipsw, "Restore.plist", &data, &size) == 0) {

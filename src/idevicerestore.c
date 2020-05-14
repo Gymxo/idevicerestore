@@ -77,6 +77,7 @@ static struct option longopts[] = {
 	{ "restore-mode", no_argument,  NULL, 'R' },
 	{ "ticket", required_argument,  NULL, 'T' },
 	{ "no-restore", no_argument,    NULL, 'z' },
+	{ "latest-shsh", no_argument,    NULL, 'w' },
 	{ NULL, 0, NULL, 0 }
 };
 
@@ -91,28 +92,30 @@ static void usage(int argc, char* argv[], int err)
 	"extracted from an IPSW.\n" \
 	"\n" \
 	"Options:\n" \
-	" -i, --ecid ECID  Target specific device by its ECID\n" \
-	"                  e.g. 0xaabb123456 (hex) or 1234567890 (decimal)\n" \
-	" -u, --udid UDID  Target specific device by its device UDID\n" \
-	"                  NOTE: only works with devices in normal mode.\n" \
-	" -l, --latest     Use latest available firmware (with download on demand).\n" \
-	"                  Before performing any action it will interactively ask to\n" \
-	"                  select one of the currently signed firmware versions,\n" \
-	"                  unless -y has been given too.\n" \
-	"                  The PATH argument is ignored when using this option.\n" \
-	"                  DO NOT USE if you need to preserve the baseband (unlock)!\n" \
-	"                  USE WITH CARE if you want to keep a jailbreakable firmware!\n" \
-	" -e, --erase      Perform a full restore, erasing all data (defaults to update)\n" \
-	"                  DO NOT USE if you want to preserve user data on the device!\n" \
-	" -y, --no-input   Non-interactive mode, do not ask for any input.\n" \
-	"                  WARNING: This will disable certain checks/prompts that are\n" \
-	"                  supposed to prevent DATA LOSS. Use with caution.\n" \
-	" -n, --no-action  Do not perform any restore action. If combined with -l option\n" \
-	"                  the on-demand ipsw download is performed before exiting.\n" \
-	" -h, --help       Prints this usage information\n" \
-	" -C, --cache-path DIR  Use specified directory for caching extracted or other\n" \
-	"                  reused files.\n" \
-	" -d, --debug      Enable communication debugging\n" \
+	" -i, --ecid ECID   Target specific device by its ECID\n" \
+	"                   e.g. 0xaabb123456 (hex) or 1234567890 (decimal)\n" \
+	" -u, --udid UDID   Target specific device by its device UDID\n" \
+	"                   NOTE: only works with devices in normal mode.\n" \
+	" -l, --latest      Use latest available firmware (with download on demand).\n" \
+	"                   Before performing any action it will interactively ask to\n" \
+	"                   select one of the currently signed firmware versions,\n" \
+	"                   unless -y has been given too.\n" \
+	"                   The PATH argument is ignored when using this option.\n" \
+	"                   DO NOT USE if you need to preserve the baseband (unlock)!\n" \
+	"                   USE WITH CARE if you want to keep a jailbreakable firmware!\n" \
+	" -e, --erase       Perform a full restore, erasing all data (defaults to update)\n" \
+	"                   DO NOT USE if you want to preserve user data on the device!\n" \
+	" -y, --no-input    Non-interactive mode, do not ask for any input.\n" \
+	"                   WARNING: This will disable certain checks/prompts that are\n" \
+	"                   supposed to prevent DATA LOSS. Use with caution.\n" \
+	" -n, --no-action   Do not perform any restore action. If combined with -l option\n" \
+	"                   the on-demand ipsw download is performed before exiting.\n" \
+	" -h, --help        Prints this usage information\n" \
+	" -C, --cache-path  DIR  Use specified directory for caching extracted or other\n" \
+	"                   reused files.\n" \
+	" -d, --debug       Enable communication debugging\n" \
+	" -w, --latest-shsh Use latest SHSH blobs for restore\n" \
+
 	"\n" \
 	"Advanced/experimental options:\n"
 	" -c, --custom     Restore with a custom firmware\n" \
@@ -344,7 +347,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 		char wtfname[256];
 		sprintf(wtfname, "Firmware/dfu/WTF.s5l%04xxall.RELEASE.dfu", cpid);
 		unsigned char* wtftmp = NULL;
-		unsigned int wtfsize = 0;
+		size_t wtfsize = 0;
 
 		// Prefer to get WTF file from the restore IPSW
 		ipsw_extract_to_memory(client->ipsw, wtfname, &wtftmp, &wtfsize);
@@ -637,6 +640,56 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	// choose whether this is an upgrade or a restore (default to upgrade)
 	client->tss = NULL;
 	plist_t build_identity = NULL;
+
+	if(client->flags & FLAG_LATEST_SHSH) {
+		plist_t signed_fws;
+		int ret = ipsw_get_signed_firmwares(client->device->product_type, &signed_fws);
+		if (ret < 0) {
+			error("ERROR: Could not fetch list of signed firmwares.\n");
+			return ret;
+		}
+		uint32_t count = plist_array_get_size(signed_fws);
+		if (count == 0) {
+			plist_free(signed_fws);
+			error("ERROR: No firmwares are currently being signed for %s (REALLY?!)\n", client->device->product_type);
+			return -1;
+		}
+		plist_t latest_version = plist_array_get_item(signed_fws, 0);
+		plist_t plist_ipsw_url = plist_dict_get_item(latest_version, "url");
+		plist_get_string_val(plist_ipsw_url, &client->latest_url);
+
+		char* tss_manifest_buf = NULL;
+		size_t tss_manifest_len = 0;
+		ret = download_firmware_component(client->latest_url, "BuildManifest.plist", &tss_manifest_buf, &tss_manifest_len);
+		if (ret < 0) {
+			error("ERROR: Could not fetch latest BuildManifest.\n");
+			return ret;
+		}
+		plist_t tss_manifest = NULL;
+		plist_from_xml(tss_manifest_buf, tss_manifest_len, &tss_manifest);
+		if(!tss_manifest) {
+			error("ERROR: Could not parse latest BuildManifest.\n");
+			return -1;
+		}
+		if (client->flags & FLAG_ERASE) {
+			client->tss_identity = build_manifest_get_build_identity_for_model_with_restore_behavior(tss_manifest, client->device->hardware_model, "Erase");
+			if (client->tss_identity == NULL) {
+				error("ERROR: Unable to find any build identities\n");
+				plist_free(tss_manifest);
+				return -1;
+			}
+		} 
+		else {
+			client->tss_identity = build_manifest_get_build_identity_for_model_with_restore_behavior(tss_manifest, client->device->hardware_model, "Update");
+			if (!client->tss_identity) {
+				client->tss_identity = build_manifest_get_build_identity_for_model(tss_manifest, client->device->hardware_model);
+			}
+		}
+		free(tss_manifest);
+		free(tss_manifest_buf);
+
+	}
+	
 	if (client->flags & FLAG_CUSTOM) {
 		build_identity = plist_new_dict();
 		{
@@ -662,7 +715,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			// get all_flash file manifest
 			char *files[16];
 			char *fmanifest = NULL;
-			uint32_t msize = 0;
+			size_t msize = 0;
 			if (ipsw_extract_to_memory(client->ipsw, tmpstr, (unsigned char**)&fmanifest, &msize) < 0) {
 				error("ERROR: could not extract %s from IPSW\n", tmpstr);
 				return -1;
@@ -803,6 +856,11 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	}
 
 	/* print information about current build identity */
+
+	if (!(client->flags & FLAG_LATEST_SHSH)) {
+		client->tss_identity = build_identity;
+	}
+
 	build_identity_print_information(build_identity);
 
 	if (client->mode->index == MODE_NORMAL && !(client->flags & FLAG_ERASE) && !(client->flags & FLAG_SHSHONLY)) {
@@ -1055,7 +1113,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 		if (client->flags & FLAG_QUIT) {
 			return -1;
 		}
-		if (get_tss_response(client, build_identity, &client->tss) < 0) {
+		if (get_tss_response(client, client->tss_identity, &client->tss) < 0) {
 			error("ERROR: Unable to get SHSH blobs for this device\n");
 			return -1;
 		}
@@ -1275,7 +1333,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 		if (nonce_changed && !(client->flags & FLAG_CUSTOM)) {
 			// Welcome iOS5. We have to re-request the TSS with our nonce.
 			plist_free(client->tss);
-			if (get_tss_response(client, build_identity, &client->tss) < 0) {
+			if (get_tss_response(client, client->tss_identity, &client->tss) < 0) {
 				error("ERROR: Unable to get SHSH blobs for this device\n");
 				if (delete_fs && filesystem)
 					unlink(filesystem);
@@ -1377,6 +1435,9 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 
 	if (build_identity)
 		plist_free(build_identity);
+
+	if(client->flags & FLAG_LATEST_SHSH)
+		plist_free(client->tss_identity);
 
 	return result;
 }
@@ -1559,7 +1620,7 @@ int main(int argc, char* argv[]) {
 		client->flags |= FLAG_INTERACTIVE;
 	}
 
-	while ((opt = getopt_long(argc, argv, "dhcesxtpli:u:nC:kyPRT:z", longopts, &optindex)) > 0) {
+	while ((opt = getopt_long(argc, argv, "dhceswxtpli:u:nC:kyPRT:z", longopts, &optindex)) > 0) {
 		switch (opt) {
 		case 'h':
 			usage(argc, argv, 0);
@@ -1587,6 +1648,10 @@ int main(int argc, char* argv[]) {
 
 		case 'l':
 			client->flags |= FLAG_LATEST;
+			break;
+
+		case 'w':
+			client->flags |= FLAG_LATEST_SHSH;
 			break;
 
 		case 'i':
@@ -2284,7 +2349,7 @@ int build_manifest_get_identity_count(plist_t build_manifest) {
 	return plist_array_get_size(build_identities_array);
 }
 
-int extract_component(const char* ipsw, const char* path, unsigned char** component_data, unsigned int* component_size)
+int extract_component(const char* ipsw, const char* path, unsigned char** component_data, size_t* component_size)
 {
 	char* component_name = NULL;
 	if (!ipsw || !path || !component_data || !component_size) {
@@ -2306,7 +2371,7 @@ int extract_component(const char* ipsw, const char* path, unsigned char** compon
 	return 0;
 }
 
-int personalize_component(const char *component_name, const unsigned char* component_data, unsigned int component_size, plist_t tss_response, unsigned char** personalized_component, unsigned int* personalized_component_size) {
+int personalize_component(const char *component_name, const unsigned char* component_data, size_t component_size, plist_t tss_response, unsigned char** personalized_component, unsigned int* personalized_component_size) {
 	unsigned char* component_blob = NULL;
 	unsigned int component_blob_size = 0;
 	unsigned char* stitched_component = NULL;

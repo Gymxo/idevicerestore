@@ -165,7 +165,7 @@ int dfu_send_component(struct idevicerestore_client_t* client, plist_t build_ide
 	}
 
 	unsigned char* component_data = NULL;
-	unsigned int component_size = 0;
+	size_t component_size = 0;
 
 	if (extract_component(client->ipsw, path, &component_data, &component_size) < 0) {
 		error("ERROR: Unable to extract component: %s\n", component);

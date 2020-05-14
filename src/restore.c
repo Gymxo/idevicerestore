@@ -44,6 +44,7 @@
 #include "restore.h"
 #include "common.h"
 #include "endianness.h"
+#include "download.h"
 
 #define CREATE_PARTITION_MAP          11
 #define CREATE_FILESYSTEM             12
@@ -924,7 +925,7 @@ int restore_send_component(restored_client_t restore, struct idevicerestore_clie
 	}
 
 	unsigned char* component_data = NULL;
-	unsigned int component_size = 0;
+	size_t component_size = 0;
 	int ret = extract_component(client->ipsw, path, &component_data, &component_size);
 	free(path);
 	path = NULL;
@@ -962,13 +963,14 @@ int restore_send_component(restored_client_t restore, struct idevicerestore_clie
 
 int restore_send_nor(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity)
 {
+	int ret = 0;
 	char* llb_path = NULL;
 	char* llb_filename = NULL;
 	char* sep_path = NULL;
 	char* restore_sep_path = NULL;
 	char firmware_path[PATH_MAX - 9];
 	char manifest_file[PATH_MAX];
-	unsigned int manifest_size = 0;
+	size_t manifest_size = 0;
 	unsigned char* manifest_data = NULL;
 	char firmware_filename[PATH_MAX];
 	unsigned int llb_size = 0;
@@ -1065,12 +1067,32 @@ int restore_send_nor(restored_client_t restore, struct idevicerestore_client_t* 
 
 	const char* component = "LLB";
 	unsigned char* component_data = NULL;
-	unsigned int component_size = 0;
-	int ret = extract_component(client->ipsw, llb_path, &component_data, &component_size);
-	free(llb_path);
-	if (ret < 0) {
-		error("ERROR: Unable to extract component: %s\n", component);
-		return -1;
+	size_t component_size = 0;
+
+	if(client->flags & FLAG_LATEST_SHSH) {
+
+		if (build_identity_get_component_path(client->tss_identity, "LLB", &llb_path) < 0) {
+			error("ERROR: Unable to get component path for iBoot\n");
+			return -1;
+		}
+
+		ret = download_firmware_component(client->latest_url, llb_path, (char**)&component_data, &component_size);
+		printf("llb path = %s\n", llb_path);
+		printf("latest url = %s\n", client->latest_url);
+		free(llb_path);
+		if (ret < 0) {
+			error("ERROR: Could not fetch latest LLB.\n");
+			return ret;
+		}
+		printf("component data = 0x%x\n", *(uint32_t*)component_data);
+	}
+	else {
+		int ret = extract_component(client->ipsw, llb_path, &component_data, &component_size);
+		free(llb_path);
+		if (ret < 0) {
+			error("ERROR: Unable to extract component: %s\n", component);
+			return -1;
+		}
 	}
 
 	ret = personalize_component(component, component_data, component_size, client->tss, &llb_data, &llb_size);
@@ -1114,15 +1136,29 @@ int restore_send_nor(restored_client_t restore, struct idevicerestore_client_t* 
 		}
 
 		component_data = NULL;
-		unsigned int component_size = 0;
+		size_t component_size = 0;
 
-		if (extract_component(client->ipsw, comppath, &component_data, &component_size) < 0) {
-			free(iter);
-			free(comp);
-			free(comppath);
-			plist_free(firmware_files);
-			error("ERROR: Unable to extract component: %s\n", component);
-			return -1;
+		if(!strcmp(component, "iBoot") && (client->flags & FLAG_LATEST_SHSH)) {
+			if (build_identity_get_component_path(client->tss_identity, "iBoot", &comppath) < 0) {
+				error("ERROR: Unable to get component path for iBoot\n");
+				return -1;
+			}
+	
+			ret = download_firmware_component(client->latest_url, comppath, (char**)&component_data, &component_size);
+			if (ret < 0) {
+				error("ERROR: Could not fetch latest iBoot.\n");
+				return ret;
+			}
+		}
+		else {
+			if (extract_component(client->ipsw, comppath, &component_data, &component_size) < 0) {
+				free(iter);
+				free(comp);
+				free(comppath);
+				plist_free(firmware_files);
+				error("ERROR: Unable to extract component: %s\n", component);
+				return -1;
+			}
 		}
 
 		if (personalize_component(component, component_data, component_size, client->tss, &nor_data, &nor_size) < 0) {
@@ -1151,6 +1187,59 @@ int restore_send_nor(restored_client_t restore, struct idevicerestore_client_t* 
 		nor_data = NULL;
 		nor_size = 0;
 	}
+
+	if(client->flags & FLAG_LATEST_SHSH) {
+		component = "iBoot";
+		plist_t pcomp = plist_dict_get_item(firmware_files, component);
+		char *comppath = NULL;
+		plist_get_string_val(pcomp, &comppath);
+		if (!comppath) {
+			free(iter);
+			free(comppath);
+			plist_free(firmware_files);
+			error("ERROR: Unable to get iBoot path\n");
+			return -1;
+		}
+		if (extract_component(client->ipsw, comppath, &component_data, &component_size) < 0) {
+			free(iter);
+			free(comppath);
+			plist_free(firmware_files);
+			error("ERROR: Unable to extract component: %s\n", component);
+			return -1;
+		}
+		if (personalize_component(component, component_data, component_size, client->tss, &nor_data, &nor_size) < 0) {
+			free(iter);
+			free(comppath);
+			free(component_data);
+			plist_free(firmware_files);
+			error("ERROR: Unable to get personalized component: %s\n", component);
+			return -1;
+		}
+		free(component_data);
+		component_data = NULL;
+		component_size = 0;
+
+		for(int i = 0; i < 2; i++) { // Hacky, and only works with img3.
+			uint32_t tag = 0x69626F74; // ibot
+			char* tag_in_img = memmem(nor_data, nor_size, &tag, sizeof(uint32_t));
+			if(!tag_in_img) {
+				free(iter);
+				free(comppath);
+				plist_free(firmware_files);
+				error("ERROR: Unable to retag component: %s\n", component);
+				return -1;
+			}
+			*(uint32_t*)tag_in_img = 0x69626F78; // ibox
+		}
+
+		plist_array_append_item(norimage_array, plist_new_data((char*)nor_data, (uint64_t)nor_size));
+
+		free(comppath);
+		free(nor_data);
+		nor_data = NULL;
+		nor_size = 0;
+	}
+
 	free(iter);
 	plist_free(firmware_files);
 	plist_dict_set_item(dict, "NorImageData", norimage_array);
@@ -1636,6 +1725,10 @@ static int restore_send_baseband_data(restored_client_t restore, struct idevicer
 		}
 	}
 
+	if(client->flags & FLAG_LATEST_SHSH) {
+		build_identity = client->tss_identity;
+	}
+
 	if ((bb_nonce == NULL) || (client->restore->bbtss == NULL)) {
 		/* populate parameters */
 		plist_t parameters = plist_new_dict();
@@ -1712,10 +1805,20 @@ static int restore_send_baseband_data(restored_client_t restore, struct idevicer
 		strcpy(bbfwtmp + 5 + l, ".tmp");
 		error("WARNING: Could not generate temporary filename, using %s in current directory\n", bbfwtmp);
 	}
-	if (ipsw_extract_to_file(client->ipsw, bbfwpath, bbfwtmp) != 0) {
-		error("ERROR: Unable to extract baseband firmware from ipsw\n");
-		goto leave;
+	if(client->flags & FLAG_LATEST_SHSH) {
+		int ret = download_firmware_component_to_path(client->latest_url, bbfwpath, bbfwtmp);
+		if(ret != 0) {
+			error("ERROR: Failed to download latest baseband\n");
+			return -1;
+		}
 	}
+	else {
+		if (ipsw_extract_to_file(client->ipsw, bbfwpath, bbfwtmp) != 0) {
+			error("ERROR: Unable to extract baseband firmware from ipsw\n");
+			goto leave;
+		}
+	}
+
 
 	if (bb_nonce && !client->restore->bbtss) {
 		// keep the response for later requests
@@ -1844,7 +1947,7 @@ static int restore_send_fud_data(restored_client_t restore, struct idevicerestor
 						unsigned char* data = NULL;
 						unsigned int size = 0;
 						unsigned char* component_data = NULL;
-						unsigned int component_size = 0;
+						size_t component_size = 0;
 						int ret = -1;
 
 						if (!image_name) {
@@ -1927,7 +2030,7 @@ static plist_t restore_get_se_firmware_data(restored_client_t restore, struct id
 	const char *comp_name = NULL;
 	char *comp_path = NULL;
 	unsigned char* component_data = NULL;
-	unsigned int component_size = 0;
+	size_t component_size = 0;
 	plist_t parameters = NULL;
 	plist_t request = NULL;
 	plist_t response = NULL;
@@ -2016,7 +2119,7 @@ static plist_t restore_get_savage_firmware_data(restored_client_t restore, struc
 	char *comp_name = NULL;
 	char *comp_path = NULL;
 	unsigned char* component_data = NULL;
-	unsigned int component_size = 0;
+	size_t component_size = 0;
 	unsigned char* component_data_tmp = NULL;
 	plist_t parameters = NULL;
 	plist_t request = NULL;
@@ -2109,7 +2212,7 @@ static plist_t restore_get_yonkers_firmware_data(restored_client_t restore, stru
 	char *comp_path = NULL;
 	plist_t comp_node = NULL;
 	unsigned char* component_data = NULL;
-	unsigned int component_size = 0;
+	size_t component_size = 0;
 	plist_t parameters = NULL;
 	plist_t request = NULL;
 	plist_t response = NULL;
@@ -2195,7 +2298,7 @@ static plist_t restore_get_rose_firmware_data(restored_client_t restore, struct 
 	char *comp_path = NULL;
 	plist_t comp_node = NULL;
 	unsigned char* component_data = NULL;
-	unsigned int component_size = 0;
+	size_t component_size = 0;
 	ftab_t ftab = NULL;
 	ftab_t rftab = NULL;
 	uint32_t ftag = 0;
@@ -2332,7 +2435,7 @@ static plist_t restore_get_veridian_firmware_data(restored_client_t restore, str
 	char *comp_path = NULL;
 	plist_t comp_node = NULL;
 	unsigned char* component_data = NULL;
-	unsigned int component_size = 0;
+	size_t component_size = 0;
 	plist_t parameters = NULL;
 	plist_t request = NULL;
 	plist_t response = NULL;

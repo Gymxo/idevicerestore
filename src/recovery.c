@@ -296,7 +296,7 @@ int recovery_send_component(struct idevicerestore_client_t* client, plist_t buil
 	}
 
 	unsigned char* component_data = NULL;
-	unsigned int component_size = 0;
+	size_t component_size = 0;
 	int ret = extract_component(client->ipsw, path, &component_data, &component_size);
 	free(path);
 	if (ret < 0) {

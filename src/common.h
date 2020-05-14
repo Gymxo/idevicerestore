@@ -80,8 +80,10 @@ struct idevicerestore_entry_t {
 };
 
 struct idevicerestore_client_t {
-	int flags;
+	uint32_t flags;
 	plist_t tss;
+	plist_t tss_identity;
+	char* latest_url;
 	char* tss_url;
 	plist_t version_data;
 	uint64_t ecid;
